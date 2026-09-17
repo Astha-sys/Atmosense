@@ -140,33 +140,19 @@ export async function getFlashFloodZones(
 ): Promise<{ zones: RiskZone[]; data_mode: "LIVE" | "DEMO" }> {
   const params = buildParams({ forecast_hour: forecastHour, lat, lon, grid_size: gridSize });
 
-  // The deployed backend may expose the flash-flood route but return 404
-  // for this parameterized request. Try the dedicated route first, then
-  // gracefully fall back to the working risk endpoint / live Open-Meteo grid.
-  try {
-    const response = await fetch(`${API_BASE_URL}/api/risk/flash-flood?${params}`);
-    if (response.ok) {
-      const data = await response.json();
-      return {
-        zones: Array.isArray(data.zones) ? data.zones : [],
-        data_mode: data.data_mode || "LIVE",
-      };
-    }
-    console.warn(`Flash-flood endpoint returned ${response.status}; using risk fallback.`);
-  } catch (error) {
-    console.warn("Flash-flood endpoint failed; using risk fallback:", error);
-  }
-
-  // Fallback 1: use the working general risk endpoint and keep only
-  // flash-flood zones when the backend provides them.
+  // Use the working general risk endpoint first. The specialized
+  // /api/risk/flash-flood route is unavailable in the deployed backend,
+  // so we intentionally do not call it here (avoids production 404s).
   try {
     const response = await fetch(`${API_BASE_URL}/api/risk?${params}`);
     if (response.ok) {
       const data = await response.json();
+
       if (Array.isArray(data.zones) && data.zones.length > 0) {
         const flashZones = data.zones.filter(
           (zone: RiskZone) => zone.hazard_type === "flash_flood"
         );
+
         if (flashZones.length > 0) {
           return {
             zones: flashZones,
@@ -174,14 +160,15 @@ export async function getFlashFloodZones(
           };
         }
       }
+    } else {
+      console.warn(`General risk endpoint returned ${response.status}.`);
     }
   } catch (error) {
-    console.warn("General risk fallback failed:", error);
+    console.warn("General risk endpoint failed:", error);
   }
 
-  // Fallback 2: derive a live flash-flood risk surface from Open-Meteo
-  // so the Flash-Flood page remains populated even when the specialized
-  // backend route is unavailable.
+  // If the backend does not provide flash-flood zones, derive a live
+  // flash-flood risk surface from Open-Meteo so the page remains populated.
   if (lat !== undefined && lon !== undefined) {
     try {
       const grid = await fetchOpenMeteoGrid(lat, lon, gridSize || 7);
