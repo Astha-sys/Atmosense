@@ -139,18 +139,92 @@ export async function getFlashFloodZones(
   gridSize?: number
 ): Promise<{ zones: RiskZone[]; data_mode: "LIVE" | "DEMO" }> {
   const params = buildParams({ forecast_hour: forecastHour, lat, lon, grid_size: gridSize });
+
+  // The deployed backend may expose the flash-flood route but return 404
+  // for this parameterized request. Try the dedicated route first, then
+  // gracefully fall back to the working risk endpoint / live Open-Meteo grid.
   try {
     const response = await fetch(`${API_BASE_URL}/api/risk/flash-flood?${params}`);
-    if (!response.ok) throw new Error(`Flash-flood API returned ${response.status}`);
-    const data = await response.json();
-    return {
-      zones: data.zones || [],
-      data_mode: data.data_mode || "LIVE",
-    };
+    if (response.ok) {
+      const data = await response.json();
+      return {
+        zones: Array.isArray(data.zones) ? data.zones : [],
+        data_mode: data.data_mode || "LIVE",
+      };
+    }
+    console.warn(`Flash-flood endpoint returned ${response.status}; using risk fallback.`);
   } catch (error) {
-    console.warn("Falling back for flash flood zones:", error);
-    return { zones: [], data_mode: "DEMO" };
+    console.warn("Flash-flood endpoint failed; using risk fallback:", error);
   }
+
+  // Fallback 1: use the working general risk endpoint and keep only
+  // flash-flood zones when the backend provides them.
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/risk?${params}`);
+    if (response.ok) {
+      const data = await response.json();
+      if (Array.isArray(data.zones) && data.zones.length > 0) {
+        const flashZones = data.zones.filter(
+          (zone: RiskZone) => zone.hazard_type === "flash_flood"
+        );
+        if (flashZones.length > 0) {
+          return {
+            zones: flashZones,
+            data_mode: data.data_mode || "LIVE",
+          };
+        }
+      }
+    }
+  } catch (error) {
+    console.warn("General risk fallback failed:", error);
+  }
+
+  // Fallback 2: derive a live flash-flood risk surface from Open-Meteo
+  // so the Flash-Flood page remains populated even when the specialized
+  // backend route is unavailable.
+  if (lat !== undefined && lon !== undefined) {
+    try {
+      const grid = await fetchOpenMeteoGrid(lat, lon, gridSize || 7);
+      const zones: RiskZone[] = grid.cells.map((cell, index) => {
+        const precipitationFactor = Math.min(1, cell.precipitation / 10);
+        const moistureFactor = cell.relative_humidity_2m / 100;
+        const instabilityFactor = Math.min(1, cell.cape / 2500);
+        const score = Math.min(
+          1,
+          precipitationFactor * 0.5 +
+          moistureFactor * 0.2 +
+          instabilityFactor * 0.3
+        );
+
+        return {
+          zone_id: `FF-GRID-${index + 1}`,
+          hazard_type: "flash_flood",
+          risk_level:
+            score >= 0.75 ? "critical" :
+            score >= 0.55 ? "high" :
+            score >= 0.35 ? "moderate" : "low",
+          risk_score: Number(score.toFixed(3)),
+          probability: Number(score.toFixed(3)),
+          center_lat: cell.lat,
+          center_lon: cell.lon,
+          forecast_hour: forecastHour,
+          data_mode: grid.data_mode,
+          primary_driver:
+            cell.precipitation > 0
+              ? "precipitation"
+              : cell.cape > 1500
+                ? "instability"
+                : "moisture",
+        };
+      });
+
+      return { zones, data_mode: grid.data_mode };
+    } catch (error) {
+      console.warn("Open-Meteo flash-flood fallback failed:", error);
+    }
+  }
+
+  return { zones: [], data_mode: "DEMO" };
 }
 
 export async function getAlerts(
@@ -177,17 +251,53 @@ export async function getAtmosphericSnapshot(
   lat: number = 30.3165,
   lon: number = 78.0322
 ): Promise<AtmosphericSnapshot> {
-  const params = new URLSearchParams({ lat: String(lat), lon: String(lon) });
+  // The deployed FastAPI service does not currently expose
+  // /api/atmospheric/snapshot. Fetch the same live atmospheric data
+  // directly from Open-Meteo instead of generating a demo fallback.
   try {
-    const response = await fetch(`${API_BASE_URL}/api/atmospheric/snapshot?${params}`);
-    if (!response.ok) throw new Error(`Atmospheric snapshot API returned ${response.status}`);
+    const params = new URLSearchParams({
+      latitude: String(lat),
+      longitude: String(lon),
+      current:
+        "temperature_2m,relative_humidity_2m,wind_speed_10m,precipitation,cloud_cover,cape",
+      hourly: "precipitation_probability",
+      forecast_days: "1",
+      timezone: "UTC",
+    });
+
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`);
+    if (!response.ok) {
+      throw new Error(`Open-Meteo snapshot returned ${response.status}`);
+    }
+
     const data = await response.json();
+    const current = data.current || {};
+    const hourly = data.hourly || {};
+    const currentTime = current.time;
+    const times: string[] = Array.isArray(hourly.time) ? hourly.time : [];
+    const probabilityValues: number[] = Array.isArray(hourly.precipitation_probability)
+      ? hourly.precipitation_probability
+      : [];
+    const probabilityIndex = currentTime ? times.indexOf(currentTime) : -1;
+
     return {
-      ...data,
-      data_mode: data.source?.toLowerCase().includes("open-meteo") ? "LIVE" : "DEMO",
+      temperature_2m: Number(current.temperature_2m ?? 0),
+      relative_humidity_2m: Number(current.relative_humidity_2m ?? 0),
+      wind_speed_10m: Number(current.wind_speed_10m ?? 0),
+      precipitation: Number(current.precipitation ?? 0),
+      precipitation_probability:
+        probabilityIndex >= 0 ? Number(probabilityValues[probabilityIndex] ?? 0) : undefined,
+      cloud_cover: Number(current.cloud_cover ?? 0),
+      cape: Number(current.cape ?? 0),
+      elevation_m: Number(data.elevation ?? 0),
+      source: "Open-Meteo",
+      data_mode: "LIVE",
+      latitude: lat,
+      longitude: lon,
+      timestamp: currentTime,
     };
   } catch (error) {
-    console.warn("Atmospheric snapshot error, using realistic fallback", error);
+    console.warn("Open-Meteo atmospheric snapshot failed; using fallback", error);
     return {
       temperature_2m: 24.5,
       relative_humidity_2m: 82.0,
@@ -203,6 +313,8 @@ export async function getAtmosphericSnapshot(
       elevation_m: 640,
       source: "Open-Meteo / Fallback Provider",
       data_mode: "DEMO",
+      latitude: lat,
+      longitude: lon,
     };
   }
 }
