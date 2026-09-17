@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { MapContainer as LeafletMap, Marker, Popup, Rectangle, useMap, useMapEvents } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
-import { Layers3, Radio, Sparkles, Navigation, Map, Globe, Mountain, Compass, Crosshair } from "lucide-react";
+import { Sparkles, Navigation, Map, Globe, Mountain, Compass, Crosshair } from "lucide-react";
 import { API_BASE_URL, AtmosphericSnapshot, getAtmosphericSnapshot } from "@/lib/api";
 import { useLocation } from "@/context/LocationContext";
 import BasemapLayer, { BasemapStyle } from "./BasemapLayer";
@@ -158,7 +158,7 @@ export default function OSMIndiaMap({
   showRadar?: boolean;
   onToggleRadar?: (val: boolean) => void;
 }) {
-  const { location: globalLoc, setLocation: setGlobalLocation, gridSize, dataMode } = useLocation();
+  const { location: globalLoc, setLocation: setGlobalLocation, gridSize } = useLocation();
   const [mounted, setMounted] = useState(false);
   const [basemapStyle, setBasemapStyle] = useState<BasemapStyle>("osm");
   const [hotspots, setHotspots] = useState<HighRiskHotspot[]>([]);
@@ -391,16 +391,6 @@ export default function OSMIndiaMap({
     if (activeHazard === "all") return true;
     return spot.hazardType === activeHazard;
   });
-
-  const filterLabel = activeHazard === "all" ? "All hazards" : activeHazard.replace("_", " ");
-  const filterColor =
-    activeHazard === "thunderstorm"
-      ? "#EF5468"
-      : activeHazard === "cloudburst"
-      ? "#2857D6"
-      : activeHazard === "flash_flood"
-      ? "#2CA36E"
-      : "#1FA971";
 
   const defaultZoom = compact ? 8 : 8;
 
